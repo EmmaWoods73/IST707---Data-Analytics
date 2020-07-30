@@ -1,0 +1,2027 @@
+---
+title: "World Happiness Project"
+output: html_document
+---
+### Load Libraries
+
+```{r}
+# General libraries
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(psych)
+library(corrplot)
+library(ggplot2)
+library(RColorBrewer)
+
+# Clustering libraries
+library(cluster)
+library(reshape2)
+library(factoextra)
+library(igraph)
+library(lsa)
+library(fpc)
+
+# Decision Tree libraries
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(caret)
+
+# Naive Bayes libraries
+library(e1071)
+library(naivebayes)
+
+# Association Rules Mining libraries
+library(arules)
+library(arulesViz)
+
+# Text Mining libraries
+#install.packages("textclean")
+#install.packages("qdap")
+install.packages("textdata")
+install.packages("ggraph")
+library(plyr)
+library(tidyverse)
+library(tidytext)
+library(readr)
+library(textclean)
+library(tm)
+library(wordcloud)
+library(qdap)
+library(syuzhet)
+library(textdata)
+library(ggraph)
+```
+
+
+### Data Preparation 
+
+```{r setup, include=FALSE}
+#library(readxl)
+
+# Load happiness data
+WorldHappinessData <- read_excel("WorldHappinessData_AWS.xls")
+View(WorldHappinessData) 
+str(WorldHappinessData)
+head(WorldHappinessData, 20)
+
+# Remove space from column names
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Country name"] <- "Country"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Life Ladder"] <- "HappinessScore"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Log GDP per capita"] <- "GDPLog"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Social support"] <- "SocialSupport"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Healthy life expectancy at birth"] <- "HealthyLifeExpectancy"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Freedom to make life choices"] <- "FreedomOfChoice"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Perceptions of corruption"] <- "Corruption"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Positive affect"] <- "PositiveAffect"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Negative affect"] <- "NegativeAffect"
+colnames(WorldHappinessData)[colnames(WorldHappinessData)=="Confidence in national government"] <- "ConfidenceInGovernment"
+
+# Update column as factors
+WorldHappinessData$Country <- as.factor(WorldHappinessData$Country)
+WorldHappinessData$Year <- as.factor(WorldHappinessData$Year)
+
+# How many countries are there total
+length(unique(WorldHappinessData$Country))
+
+# How many years of data
+unique(WorldHappinessData$Year)
+
+#library(dplyr)
+
+# How many countries by year of data
+WorldHappinessData[c("Country", "Year")] %>% 
+  group_by(Year) %>%
+  summarise(numCountry = length(Country))
+
+# Load world regions
+WorldRegions <- read.csv("WorldHappinessRegions_AWS.csv")
+str(WorldRegions)
+
+# Update region column name
+colnames(WorldRegions)[colnames(WorldRegions)=="Region.indicator"] <- "Region"
+
+# Create a dataset with only the happiness measures and 6 predictors
+Happiness <- merge(WorldHappinessData[,1:11] , WorldRegions, by = "Country", all=TRUE)
+
+# Country without region
+Happiness[is.na(Happiness$Region),]
+
+# Wide data incomplete cases = 203 
+Happiness[!complete.cases(Happiness),] 
+
+#library(tidyr)
+# Create a long dataset for further analysis
+Happiness_long <- gather(Happiness, Factor, value = 'Measure', GDPLog:Corruption, factor_key=TRUE)
+head(Happiness_long)
+
+# Long data incomplete cases = 463 
+Happiness_long[!complete.cases(Happiness_long),] 
+
+```
+
+### Exploratory Data Analysis
+
+```{r}
+# Correlation analysis
+#library(psych)
+pairs.panels(Happiness[, 3:11])
+
+#library(corrplot)
+corrplot(cor(Happiness[, 3:11], use = "complete.obs") , type = "upper", order = "hclust", tl.col = "black", tl.srt = 90)
+
+#library(ggplot2)
+theme_update(plot.title = element_text(hjust = 0.5))  # Center plot title
+ggplot(data = subset(Happiness_long, Year %in% c('2017', '2018')), aes(y=HappinessScore, x=Measure)) +
+  facet_wrap(~ Factor,  scales = "free")  + geom_point(aes(color=Year), na.rm=TRUE) +
+  geom_smooth(method = lm, se = FALSE, na.rm=TRUE) 
+
+# Countries by Region
+distinct(Happiness[c("Country", "Region")]) %>% 
+  filter(!is.na(Region))  %>%
+  group_by(Region) %>%
+  summarise(numCountry = length(Country)) %>%
+ggplot(aes(x = Region, y = numCountry, fill = factor(Region))) + geom_bar(stat="identity") +
+  labs(fill = "Region") +
+  labs(title = "Countries By Region", x = "", y = "Count") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+```
+
+```{r}
+# Distribution analysis
+ggplot(data = subset(Happiness, Year == '2018'), aes(x = Region, y = HappinessScore)) +
+  geom_boxplot( aes(color = Region, fill = Region), alpha = 0.5, na.rm=TRUE) +
+  geom_point(aes(color = Region), position = position_jitter(width = .1)) +
+  labs(title = "Happiness by World Region - 2018", 
+       x = "Region", 
+       y = "Happiness Score") +
+  theme_minimal()  +
+   theme(plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1)),
+        axis.text.x = element_blank())
+
+subset(Happiness, Year == '2018')
+
+subset(Happiness[order(Happiness$HappinessScore),], Year == '2018')
+
+```
+
+
+### Clustering Model
+
+```{r}
+#install.packages("cluster")
+#install.packages("ggplot2")
+#install.packages("reshape2")
+#install.packages("factoextra")
+#install.packages("igraph")
+#install.packages("lsa")
+#install.packages("fpc")
+
+#library(cluster)
+#library(ggplot2)
+#library(reshape2)
+#library(factoextra)
+#library(igraph)
+#library(lsa)
+#library(fpc)
+
+```
+
+### Preprocessing for kmeans
+
+#### For this project, we will cluster using 2018 data only and using all available data 
+#### This should provide a good cluster analysis and also the ability to determine whether #### there are countries that have moved clusters 'up' or 'down' over the years
+
+```{r}
+### 2018 data only FIRST
+
+Happiness2018 <- subset(Happiness, Year == 2018)
+
+## remove columns 1-3 (Country, Year, Score)
+Happiness2018_nolabels <- Happiness2018 [,-c(1:3)]
+# also region
+Happiness2018_nolabels <- Happiness2018_nolabels [,c(1:8)]
+str(Happiness2018_nolabels)
+
+### DEAL WITH THE NA's ###
+##########################
+
+### use median 
+for(i in 1:ncol(Happiness2018_nolabels[, 1:8])) {
+  Happiness2018_nolabels[, 1:8][is.na(Happiness2018_nolabels[, 1:8][,i]), i] <- median(Happiness2018_nolabels[, 1:8][,i], na.rm = TRUE)
+}
+### summary of the raw data
+summary(Happiness2018_nolabels)
+
+# check complete cases 
+Happiness2018_nolabels[!complete.cases(Happiness2018_nolabels),] 
+
+### Same process now applied to ALL years available
+
+## remove columns 1-3 (Country,Year, Score)
+Happiness_kmeansDF <- Happiness [,-c(1:3)]
+# also region
+Happiness_kmeansDF <- Happiness_kmeansDF [,c(1:8)]
+str(Happiness_kmeansDF)
+
+### use median for NAs
+for(i in 1:ncol(Happiness_kmeansDF[, 1:8])) {
+  Happiness_kmeansDF[, 1:8][is.na(Happiness_kmeansDF[, 1:8][,i]), i] <- median(Happiness_kmeansDF[, 1:8][,i], na.rm = TRUE)
+}
+### summary of the raw data
+summary(Happiness_kmeansDF)
+
+# check complete cases again
+Happiness_kmeansDF[!complete.cases(Happiness_kmeansDF),] 
+```
+
+### Data Transformation
+
+```{r}
+## transform all variables to a range of between 0-1 for clustering
+
+## 2018 data first
+range_transform <- function(x) {
+  (x - min(x))/(max(x)-min(x))
+}
+Happiness2018_nolabels[,1:8] <- as.data.frame(apply(Happiness2018_nolabels[,1:8], 2, range_transform))
+
+### summary of transformed data shows success of transformation
+summary(Happiness2018_nolabels[,1:8])
+
+## now all data
+range_transform <- function(x) {
+  (x - min(x))/(max(x)-min(x))
+}
+Happiness_kmeansDF[,1:8] <- as.data.frame(apply(Happiness_kmeansDF[,1:8], 2, range_transform))
+
+### summary of transformed data shows success of transformation
+summary(Happiness_kmeansDF[,1:8])
+
+#### SCALING
+## Scale variables to a mean of 0 and standard deviation of 1
+
+# 2018
+sd_scale <- function(x) {
+  (x - mean(x))/sd(x)
+}
+Happiness2018_scaled <- as.data.frame(apply(Happiness2018_nolabels[,1:8], 2, sd_scale))
+
+### summary of the scaled data
+summary(Happiness2018_scaled)
+
+# All years
+sd_scale <- function(x) {
+  (x - mean(x))/sd(x)
+}
+Happiness_scaled <- as.data.frame(apply(Happiness_kmeansDF, 2, sd_scale))
+
+### summary of the scaled data
+summary(Happiness_scaled)
+```
+
+### Correlation Analysis
+
+```{r}
+## take a look at the relationship of the scaled variables to each other
+## we will just look at 2018 
+
+corr <- cor(Happiness2018_scaled, method="pearson")
+ggplot(melt(corr, varnames=c("x", "y"), value.name="correlation"), 
+       aes(x=x, y=y)) +
+  geom_tile(aes(fill=correlation)) +
+  scale_fill_gradient2(low="green", mid="yellow", high="red",
+                       guide=guide_colorbar(ticks=FALSE, barheight = 5),
+                       limits=c(-1,1)) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  labs(title="Heatmap of Correlation Matrix", 
+       x=NULL, y=NULL)
+
+```
+
+### Select the number of means (clusters)
+
+```{r}
+# Elbow Plot method for finding the optimal number of clusters
+# We will use the 2018 data
+
+set.seed(123)
+# Compute and plot wss for k = 2 to k = 15.
+k.max <- 15
+data_2018 <- Happiness2018_scaled
+wss <- sapply(1:k.max, 
+              function(k){kmeans(data_2018, k, nstart=50,iter.max = 15 )$tot.withinss})
+wss
+
+plot(1:k.max, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+
+```
+
+#### Elbow plot indicates that 4 seems to be a good number of clusters 
+
+### Run kmeans
+
+```{r}
+## set k to 4
+k = 4
+
+set.seed(123)
+# start with 2018
+(kmeans_2018 <- kmeans(data_2018, k))
+
+## Get the clusters that were assigned to each group
+clusterGroups_2018 <- data.frame(Happiness2018,kmeans_2018$cluster)
+
+View(clusterGroups_2018)
+
+## plot the clusters
+plot(Happiness2018$Country~ jitter(kmeans_2018$cluster, 1),
+     pch=21,col=as.factor(Happiness2018$Region))
+
+## Another cluster vis
+fviz_cluster(kmeans_2018, data_2018)
+
+## let's see how many countries are in each cluster
+table(kmeans_2018$cluster)
+
+# ALL YEARS
+data <- Happiness_scaled
+(kmeans_4 <- kmeans(data, k))
+
+## Get the clusters that were assigned to each group
+clusterGroups4 <- data.frame(Happiness,kmeans_4$cluster)
+
+View(clusterGroups4)
+
+## plot the clusters
+plot(Happiness$Country~ jitter(kmeans_4$cluster, 1),
+     pch=21,col=as.factor(Happiness$Region))
+
+## Another cluster vis
+fviz_cluster(kmeans_4, data)
+
+## let's see how many countries are in each cluster
+table(kmeans_4$cluster)
+
+```
+
+#### VISUALIZE 2018 DATA
+
+```{r}
+
+## 2018 - list of cluster assignments
+o=order(kmeans_2018$cluster)
+CountryHappyGroup_2018 <- data.frame(Happiness2018$Country[o],kmeans_2018$cluster[o])
+(head(CountryHappyGroup_2018,n=40))
+
+## use PCA (prin comp analysis) to reduce dimensionality
+## then view the clusters
+clusplot(data_2018, kmeans_2018$cluster,color=TRUE,
+         shade=TRUE, labels=2, lines=0, main= 'World Happy Groups 2018')
+
+library(cluster)
+## get all records belonging to cluster 1
+kmeans2018_clus_1 <- clusterGroups_2018[ !(clusterGroups_2018$kmeans_2018.cluster %in% c("2", "3", "4")), ]
+kmeans2018_clus_1
+
+# correlation matrix for cluster 1
+corrplot(cor(kmeans2018_clus_1[, 4:11], use = "complete.obs") , type = "upper", order = "hclust", tl.col = "black", tl.srt = 90)
+
+# bubble chart based on correlation matrix results
+theme_set(theme_bw())  # pre-set the bw theme.
+cl1 <- ggplot(kmeans2018_clus_1, aes(SocialSupport, NegativeAffect)) + 
+  labs(subtitle="Social Support & Negative Affect",
+       title="Cluster Group 1")
+cl1 + geom_jitter(aes(col=Region, size=HealthyLifeExpectancy)) + 
+  geom_smooth(aes(col=Region), method="lm", se=F)
+
+h1 <- ggplot(kmeans2018_clus_1, aes(Region))
+h1 + geom_bar(aes(fill=Country), width = 0.5) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5)) +
+  theme(legend.position = "right") +
+  theme(legend.margin = margin(t = 5, unit = 'cm')) +
+  theme(legend.title = element_text(size = 10, face = "bold")) +
+  theme(legend.text = element_text(size=8)) +
+  labs(subtitle="Countries by Region",
+       title="Cluster Group 1")
+
+## get all records belonging to cluster 2
+kmeans2018_clus_2 <- clusterGroups_2018[ !(clusterGroups_2018$kmeans_2018.cluster %in% c("1", "3", "4")), ]
+kmeans2018_clus_2
+
+# correlation matrix for cluster 2
+corrplot(cor(kmeans2018_clus_2[, 4:11], use = "complete.obs") , type = "upper", order = "hclust", tl.col = "black", tl.srt = 90)
+
+# bubble chart based on correlation matrix results
+theme_set(theme_bw())  # pre-set the bw theme.
+cl2 <- ggplot(kmeans2018_clus_2, aes(SocialSupport, Corruption)) + 
+  labs(subtitle="Social Support & Corruption",
+       title="Cluster Group 2")
+cl2 + geom_jitter(aes(col=Region, size=NegativeAffect)) + 
+  geom_smooth(aes(col=Region), method="lm", se=F)
+
+h2 <- ggplot(kmeans2018_clus_2, aes(Region))
+h2 + geom_bar(aes(fill=Country), width = 0.5) +
+  theme(axis.text.x = element_text(angle=90)) +
+  theme(legend.position = "left") +
+  theme(legend.margin = margin(t = 5, unit = 'cm')) +
+  theme(legend.title = element_text(size = 10, face = "bold")) +
+  theme(legend.text = element_text(size=8)) +
+  labs(subtitle="Countries by Region",
+       title="Cluster Group 2") 
+
+## get all records belonging to cluster 3
+kmeans2018_clus_3 <- clusterGroups_2018[ !(clusterGroups_2018$kmeans_2018.cluster %in% c("1", "2", "4")), ]
+kmeans2018_clus_3
+
+# correlation matrix for cluster 3
+corrplot(cor(kmeans2018_clus_3[, 4:11], use = "complete.obs") , type = "upper", order = "hclust", tl.col = "black", tl.srt = 90)
+
+# bubble chart based on correlation matrix results
+theme_set(theme_bw())  # pre-set the bw theme.
+cl3 <- ggplot(kmeans2018_clus_3, aes(SocialSupport, Corruption)) + 
+  labs(subtitle="Social Support & Corruption",
+       title="Cluster Group 3")
+cl3 + geom_jitter(aes(col=Region, size=NegativeAffect)) + 
+  geom_smooth(aes(col=Region), method="lm", se=F)
+
+h3 <- ggplot(kmeans2018_clus_3, aes(Region))
+h3 + geom_bar(aes(fill=Country), width = 0.4) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5)) +
+  theme(legend.position = "right") +
+  theme(legend.margin = margin(t = 5, unit = 'cm')) +
+  theme(legend.title = element_text(size = 10, face = "bold")) +
+  theme(legend.text = element_text(size=8)) +
+  labs(subtitle="Countries by Region",
+       title="Cluster Group 3")
+
+## get all records belonging to cluster 4
+kmeans2018_clus_4 <- clusterGroups_2018[ !(clusterGroups_2018$kmeans_2018.cluster %in% c("1", "2", "3")), ]
+kmeans2018_clus_4
+
+# correlation matrix for cluster 4
+corrplot(cor(kmeans2018_clus_4[, 4:11], use = "complete.obs") , type = "upper", order = "hclust", tl.col = "black", tl.srt = 90)
+
+# bubble chart based on correlation matrix results
+theme_set(theme_bw())  # pre-set the bw theme.
+cl4 <- ggplot(kmeans2018_clus_4, aes(SocialSupport, FreedomOfChoice)) + 
+  labs(subtitle="Social Support & Freedom of Choice",
+       title="Cluster Group 4")
+cl4 + geom_jitter(aes(col=Region, size=PositiveAffect)) + 
+  geom_smooth(aes(col=Region), method="lm", se=F)
+
+h4 <- ggplot(kmeans2018_clus_4, aes(Region))
+h4 + geom_bar(aes(fill=Country), width = 0.5) +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5)) +
+  theme(legend.position = "left") +
+  theme(legend.margin = margin(t = 4, unit = 'cm')) +
+  theme(legend.text = element_text(size=8)) +
+  labs(subtitle="Countries by Region",
+       title="Cluster Group 4")
+
+```
+
+### Hierarchical Clustering 
+
+```{r}
+d1 <- dist(data, method = "euclidean") # distance matrix
+
+hierarchy1 <- hclust(d1, method="ward.D2")
+
+plot(hierarchy1, cex=0.9, hang=-1, main='Euclidean Dendrogram') # display dendogram
+rect.hclust(hierarchy1, k=4) # highlight clusters on the dendogram
+
+```
+
+### Cosine Similarity 
+
+```{r}
+## First we need a matrix
+Happiness_Matrix <- as.matrix(data)
+
+Cos_SimMatrix <- cosine(Happiness_Matrix)
+diag(Cos_SimMatrix) <- 0 # Remove relationship with self
+Cos_SimMatrix
+
+# Prune edges of the tree
+edgeLimit <- .70
+Cos_SimMatrix[(Cos_SimMatrix < edgeLimit)] <- 0
+
+## Make the network
+(Cos_Sim_Network <- graph_from_adjacency_matrix(Cos_SimMatrix, 
+                                                mode = 'undirected', 
+                                                weighted = T))
+
+ceb <- cluster_edge_betweenness(Cos_Sim_Network) # For community detection
+
+cosine_plot <- dendPlot(ceb, mode="hclust")
+cosine_plot
+
+##plot the network
+plot(x=ceb, y=Cos_Sim_Network)
+
+## This shows that the cosine Sim is high between GDPLog and Healthy Life Expectancy
+
+```
+
+### Decision Tree - Analysis & Prep
+
+```{r}
+# Data Preprocessing - Remove incomplete cases & split data
+Happiness_complete <- Happiness[complete.cases(Happiness),]
+
+Happiness_complete$RangedHLE <- range_transform(Happiness_complete$HealthyLifeExpectancy)
+Happiness_complete$SDHLE <- sd_scale(Happiness_complete$HealthyLifeExpectancy)
+
+cut(Happiness_complete$HappinessScore, 3)
+Happiness_complete$HappinessLevel  <- cut(Happiness_complete$HappinessScore, breaks = c(0, 4.5, 6, 10),labels=c("Low", "Medium", "High"))
+Happiness_2018 <- subset(Happiness_complete, Year %in% c("2018"))
+Happiness_prior <- subset(Happiness_complete, Year %in% c("2017", "2016", "2015", "2014", "2013"))
+
+Happiness_2018[order(-Happiness_2018$HappinessScore), , drop = FALSE]
+
+set.seed (326)
+split <- sample(nrow(Happiness_prior), nrow(Happiness_prior) * 0.9)
+Train_Happiness_prior <- Happiness_prior[split, ]
+Test_Happiness_prior <- Happiness_prior[-split, ]
+
+str(Train_Happiness_prior)
+str(Test_Happiness_prior)
+
+
+# Info Gain
+CORElearn::attrEval(Happiness_prior$HappinessLevel ~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore")],  estimator = "InfGain", outputNumericSplits = TRUE)
+
+CORElearn::attrEval(Happiness_prior$HappinessLevel ~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore")],  estimator = "Gini")
+ 
+CORElearn::attrEval(Happiness_prior$HappinessLevel ~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore")],  estimator = "GainRatio")
+
+GainRatio <- CORElearn::attrEval(Happiness_prior$HappinessLevel ~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "Region", "NegativeAffect", "HappinessScore", "SDHLE", "RangedHLE")],  outputNumericSplits = TRUE, estimator = "GainRatio")
+
+GainRatio
+GainRatio_df <- as.data.frame(GainRatio)
+GainRatio_df[order(-GainRatio_df$GainRatio), , drop = FALSE]
+
+InfoGain <- CORElearn::attrEval(Happiness_prior$HappinessLevel ~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "Region", "NegativeAffect", "HappinessScore", "SDHLE", "RangedHLE")],  estimator = "InfGain")
+InfoGain_df <- as.data.frame(InfoGain)
+InfoGain_df[order(-InfoGain_df$InfoGain), , drop = FALSE]
+
+Gini <- CORElearn::attrEval(Happiness_prior$HappinessLevel ~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "Region", "NegativeAffect", "HappinessScore", "SDHLE", "RangedHLE")],  estimator = "Gini")
+Gini_df <- as.data.frame(Gini)
+Gini_df[order(-Gini_df$Gini), , drop = FALSE]
+
+```
+
+### Decision Tree - Fit
+
+```{r}
+# Decision Tree Model
+# library(rpart)
+# library(rpart.plot)
+# library(rattle)
+# library(caret)
+
+# Train with all Prior Years and Predict 2018 Happiness Level (InfoGain)
+DT_Happiness_infogain <- rpart(HappinessLevel~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore", "Region",  "RangedHLE", "SDHLE")], method = "class", cp = 0.01, parms = list(split = "information"))
+DT_Happiness_infogain_pred <- predict(DT_Happiness_infogain, newdata = Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore", "HappinessLevel", "Region",  "RangedHLE", "SDHLE")], type = "class")
+DT_Happiness_infogain_results <-  cbind(Happiness_2018, DT_Happiness_infogain_pred)
+confusionMatrix(DT_Happiness_infogain_results$DT_Happiness_infogain_pred, DT_Happiness_infogain_results$HappinessLevel)
+
+fancyRpartPlot(DT_Happiness_infogain)
+DT_Happiness_infogain
+summary(DT_Happiness_infogain)
+DT_Happiness_infogain_results 
+
+# Retrain with all Prior Years and Predict 2018 Happiness Level (Gini)
+DT_Happiness_gini <- rpart(HappinessLevel~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "Region", "HappinessScore",  "RangedHLE", "SDHLE")], method = "class", cp = 0.01,  parms = list(split = "gini"))
+DT_Happiness_gini_pred <- predict(DT_Happiness_gini, newdata = Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "Region", "HappinessScore", "HappinessLevel",  "RangedHLE", "SDHLE")], type = "class")
+DT_Happiness_gini_results <-  cbind(Happiness_2018, DT_Happiness_gini_pred)
+confusionMatrix(DT_Happiness_gini_results$DT_Happiness_gini_pred, DT_Happiness_gini_results$HappinessLevel)
+
+fancyRpartPlot(DT_Happiness_gini)
+DT_Happiness_gini
+DT_Happiness_gini_results
+
+
+# Retrain with all Prior Years and Predict 2018 Happiness Level (GainRatio)
+DT_Happiness_gainratio <- rpart(HappinessLevel~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "Region", "HappinessScore",  "RangedHLE", "SDHLE")], method = "class", cp = 0.01,  parms = list(split = "GainRatio"))
+DT_Happiness_gainratio_pred <- predict(DT_Happiness_gainratio, newdata = Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "Region", "HappinessScore", "HappinessLevel",  "RangedHLE", "SDHLE")], type = "class")
+DT_Happiness_gainratio_results <-  cbind(Happiness_2018, DT_Happiness_gainratio_pred)
+confusionMatrix(DT_Happiness_gainratio_results$DT_Happiness_gainratio_pred, DT_Happiness_gainratio_results$HappinessLevel)
+
+fancyRpartPlot(DT_Happiness_gainratio)
+DT_Happiness_gainratio
+DT_Happiness_gainratio_results
+
+
+# Retrain with all Prior Years and Predict 2018 Happiness Level (With Region)
+DT_Happiness_region <- rpart(HappinessLevel~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore",  "RangedHLE", "SDHLE")], method = "class", cp = 0.01,  parms = list(split = "InfoGain"))
+DT_Happiness_region_pred <- predict(DT_Happiness_region, newdata = Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore", "HappinessLevel",  "RangedHLE", "SDHLE")], type = "class")
+DT_Happiness_region_results <-  cbind(Happiness_2018, DT_Happiness_region_pred)
+confusionMatrix(DT_Happiness_region_results$DT_Happiness_region_pred, DT_Happiness_region_results$HappinessLevel)
+
+
+# Retrain with all Prior Years and Predict 2018 Happiness Level (With Region)
+DT_Happiness_gini <- rpart(HappinessLevel~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore",  "RangedHLE", "SDHLE")], method = "class", cp = 0.01,  parms = list(split = "gini"))
+DT_Happiness_gini_pred <- predict(DT_Happiness_gini, newdata = Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore", "HappinessLevel",  "RangedHLE", "SDHLE")], type = "class")
+DT_Happiness_gini_results <-  cbind(Happiness_2018, DT_Happiness_gini_pred)
+confusionMatrix(DT_Happiness_gini_results$DT_Happiness_gini_pred, DT_Happiness_gini_results$HappinessLevel)
+
+
+# Using transformed data - No difference
+DT_Happiness_Transform <- rpart(HappinessLevel~ ., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore", "HealthyLifeExpectancy", "RangedHLE", "Region")], method = "class", cp = 0.01, parms = list(split = "information"))
+DT_Happiness_Transform_pred <- predict(DT_Happiness_Transform, newdata = Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "PositiveAffect", "NegativeAffect", "HappinessScore", "HappinessLevel", "HealthyLifeExpectancy", "RangedHLE",  "Region")], type = "class")
+DT_Happiness_Transform_results <-  cbind(Happiness_2018, DT_Happiness_Transform_pred)
+confusionMatrix(DT_Happiness_Transform_results$DT_Happiness_Transform_pred, DT_Happiness_Transform_results$HappinessLevel)
+fancyRpartPlot(DT_Happiness_Transform)
+
+```
+
+### Naive Bayes
+
+```{r}
+#library(e1071)
+#library(naivebayes)
+#library(caret)
+#library(RColorBrewer)
+
+# Data Preprocessing for Naive Bayes - Remove incomplete cases & split data
+Happiness_NB <- Happiness[complete.cases(Happiness),]
+
+Happiness_NB$RangedHLE <- range_transform(Happiness_NB$HealthyLifeExpectancy)
+Happiness_NB$SDHLE <- range_transform(Happiness_NB$HealthyLifeExpectancy)
+str(Happiness_NB)
+head(Happiness_NB)
+mean(Happiness_NB$HappinessScore)
+which.max(Happiness_NB$HappinessScore)
+View(Happiness_NB[363, ])
+
+# Split label into two categories for NB prediction
+cut(Happiness_NB$HappinessScore, 2)
+Happiness_NB$HappinessLevel  <- cut(Happiness_NB$HappinessScore, breaks = c(0, 4, 10),labels=c("Unhappy", "Happy"))
+Happiness_NB_2018 <- subset(Happiness_NB, Year %in% c("2018"))
+Happiness_NB_prior <- subset(Happiness_NB, Year %in% c("2017", "2016", "2015", "2014", "2013"))
+str(Happiness_NB_2018)
+str(Happiness_NB_prior)
+
+# Split label into three categories for NB prediction
+Happiness_NB2 <- Happiness_NB
+cut(Happiness_NB2$HappinessScore, 3)
+Happiness_NB2$HappinessLevel <- cut(Happiness_NB2$HappinessScore, breaks = c(0, 4.5, 6, 10),labels=c("Low", "Medium", "High"))
+Happiness_NB2_2018 <- subset(Happiness_NB2, Year %in% c("2018"))
+Happiness_NB2_prior <- subset(Happiness_NB2, Year %in% c("2017", "2016", "2015", "2014", "2013"))
+str(Happiness_NB2_2018)
+str(Happiness_NB2_prior)
+
+# split the prior DF into train/test
+# use 2018 DF for final prediction
+set.seed (326)
+split <- sample(nrow(Happiness_NB_prior), nrow(Happiness_NB_prior) * 0.9)
+Train_Happiness_NB <- Happiness_NB_prior[split, ]
+Test_Happiness_NB <- Happiness_NB_prior[-split, ]
+
+str(Train_Happiness_NB)
+str(Test_Happiness_NB)
+
+## Naive Bayes works on numerical data ONLY
+## Remove labels and nominal variables
+Train_NB_onlynums <- Train_Happiness_NB[-c(1,2,3, 12)]
+Test_NB_onlynums <- Test_Happiness_NB[-c(1,2,3,12,15)]  
+Test2018_NB_onlynums <- Happiness_NB_2018[-c(1,2,3,12,15)]  
+Happiness_NB_TrainLABELS <-Train_Happiness_NB$HappinessLevel
+Happiness_NB_TestLABELS <- Test_Happiness_NB$HappinessLevel
+Happiness_NB_2018_LABELS <- Happiness_NB_2018$HappinessLevel
+
+plot(Train_Happiness_NB$HealthyLifeExpectancy,Train_Happiness_NB$SocialSupport,
+     col=Train_Happiness_NB$HappinessScore)
+
+# looks good, let's go!
+
+## Now to run the Naive Bayes (NB) classifier
+NB_HappyGroups <- naiveBayes(HappinessLevel ~.,data=Train_NB_onlynums, na.action = na.pass)
+
+NB_HappyGroups_Pred <- predict(NB_HappyGroups, Test_NB_onlynums)
+NB_HappyGroups
+
+print(NB_HappyGroups_Pred)
+table(NB_HappyGroups_Pred,Happiness_NB_TestLABELS)
+##Visualize
+plot(NB_HappyGroups_Pred, ylab = "Density", main = "Naive Bayes Prediction using all predictor variables")
+
+barplot(table(NB_HappyGroups_Pred), main="Naive Bayes Prediction (All Variables)", col=brewer.pal(10,"Set3"),
+    xlab="Prediction", ylab = "Frequency")
+
+# predict 2018 happiness levels
+NB_HappyGroups_Pred2018<-predict(NB_HappyGroups, Test2018_NB_onlynums)
+print(NB_HappyGroups_Pred2018)
+table(NB_HappyGroups_Pred2018,Happiness_NB_2018_LABELS)
+##Visualize
+plot(NB_HappyGroups_Pred2018, ylab = "Density", main = "Naive Bayes 2018 Prediction")
+
+barplot(table(NB_HappyGroups_Pred2018), main="Naive Bayes Prediction (2018)", col=brewer.pal(10,"Set3"),
+    xlab="Prediction", ylab = "Density")
+
+# prediction confusion matrix
+table(NB_HappyGroups_Pred2018,Happiness_NB_2018_LABELS)
+
+## now use naivebayes package
+Naivebayes_model<- naive_bayes(HappinessLevel~., data=Train_NB_onlynums)
+Naivebayes_pred<-predict(Naivebayes_model, Test_NB_onlynums, type = c("class"))
+head(predict(Naivebayes_model, Test_NB_onlynums, type = "prob"))
+
+# prediction confusion matrix
+table(Naivebayes_pred,Happiness_NB_TestLABELS)
+plot(Naivebayes_pred, ylab = "Density", main = "Naive Bayes Prediction")
+
+# combine prediction with prior DF
+# combine prediction with 2018 DF
+
+NB_results=cbind(Test_Happiness_NB, Naivebayes_pred)
+confusionMatrix(NB_results$Naivebayes_pred, NB_results$HappinessLevel)
+
+## both models appear to have the same results 
+
+# predict 2018 happiness levels
+Naivebayes_pred2018<-predict(Naivebayes_model, Test2018_NB_onlynums, type = c("class"))
+head(predict(Naivebayes_model, Test2018_NB_onlynums, type = "prob"))
+
+# prediction confusion matrix
+table(Naivebayes_pred2018,Happiness_NB_2018_LABELS)
+
+# combine prediction with 2018 DF
+NB2018_results=cbind(Happiness_NB_2018, NB_HappyGroups_Pred2018)
+confusionMatrix(NB2018_results$NB_HappyGroups_Pred2018, NB2018_results$HappinessLevel)
+
+mylabels=c("HappinessLevel")
+id_col=Happiness_NB_2018[mylabels]
+NBpred2018=cbind(id_col, NB_HappyGroups_Pred2018)
+colnames(NBpred2018)=c("Original", "Predicted")
+View(NBpred2018)
+write.csv(NBpred2018, file="Naive-Bayes-Prediction-2018.csv", row.names=FALSE)
+
+# As NB works on the assumption that variables are NOT independent, let's remove
+# any highly correlated ones and re-run
+
+# according to the correlation matrix, Healthy Life Expectancy and Social Support are
+# highly correlated
+# we will only include variables related to government
+
+## Now to run the Naive Bayes (NB) classifier
+NB_HappyGroups_select <- naiveBayes(HappinessLevel ~ GDPLog + SocialSupport + FreedomOfChoice + Corruption,data=Train_NB_onlynums, na.action = na.pass)
+
+NB_HappyGroups_Pred_select <- predict(NB_HappyGroups_select, Test_NB_onlynums)
+NB_HappyGroups_select
+
+print(NB_HappyGroups_Pred_select)
+table(NB_HappyGroups_Pred_select,Happiness_NB_TestLABELS)
+
+## Run the Naive Bayes (NB) classifier to include ONLY social predictors
+NB_HappyGroups_select2 <- naiveBayes(HappinessLevel ~ SocialSupport + HealthyLifeExpectancy + FreedomOfChoice + Generosity,data=Train_NB_onlynums, na.action = na.pass)
+
+NB_HappyGroups_Pred_select2 <- predict(NB_HappyGroups_select, Test_NB_onlynums)
+NB_HappyGroups_select2
+
+print(NB_HappyGroups_Pred_select2)
+table(NB_HappyGroups_Pred_select2,Happiness_NB_TestLABELS)
+
+##Visualize
+barplot(table(NB_HappyGroups_Pred_select2), main="Naive Bayes Prediction (Social Factor Variables only)", col=brewer.pal(10,"Set3"),
+    xlab="Prediction", ylab = "Frequency")
+# there seems to be a high number of countries predicted to be "happy" when social factors are removed
+
+# predict 2018 happiness levels
+NB_HappyGroups_Pred2018_select<-predict(NB_HappyGroups_select, Test2018_NB_onlynums)
+print(NB_HappyGroups_Pred2018_select)
+table(NB_HappyGroups_Pred2018_select,Happiness_NB_2018_LABELS)
+confusionMatrix(NB2018_results$NB_HappyGroups_Pred2018, NB2018_results$HappinessLevel)
+##Visualize
+plot(NB_HappyGroups_Pred2018_select, ylab = "Density", main = "Naive Bayes 2018 Prediction - select variables only")
+
+# prediction confusion matrix
+table(NB_HappyGroups_Pred2018_select,Happiness_NB_2018_LABELS)
+
+# INTERESTING! this method is more accurate on the 2018 data and less on the 'all' data
+# Overall - positive / negative affect and healthy life expectancy clearly play an important role
+
+# try this time on 3 categories
+
+# split the prior DF into train/test
+# use 2018 DF for final prediction
+set.seed (326)
+split <- sample(nrow(Happiness_NB2_prior), nrow(Happiness_NB2_prior) * 0.9)
+Train_Happiness_NB2 <- Happiness_NB2_prior[split, ]
+Test_Happiness_NB2 <- Happiness_NB2_prior[-split, ]
+
+str(Train_Happiness_NB2)
+str(Train_Happiness_NB2)
+
+## Naive Bayes works on numerical data ONLY
+## Remove labels and nominal variables
+Train_NB2_onlynums <- Train_Happiness_NB2[-c(1,2,3, 12)]
+Test_NB2_onlynums <- Test_Happiness_NB2[-c(1,2,3,12,15)]  
+Test2018_NB2_onlynums <- Happiness_NB2_2018[-c(1,2,3,12,15)]  
+Happiness_NB2_TrainLABELS <-Train_Happiness_NB2$HappinessLevel
+Happiness_NB2_TestLABELS <- Test_Happiness_NB2$HappinessLevel
+Happiness_NB2_2018_LABELS <- Happiness_NB2_2018$HappinessLevel
+
+plot(Train_Happiness_NB2$SocialSupport,Train_Happiness_NB2$PositiveAffect,
+     col=Train_Happiness_NB2$HappinessScore)
+
+# looks good, let's go!
+
+## Now to run the Naive Bayes (NB) classifier on 3 prediction categories
+NB_HappyGroups2 <- naiveBayes(HappinessLevel ~.,data=Train_NB2_onlynums, na.action = na.pass)
+
+NB_HappyGroups_Pred2 <- predict(NB_HappyGroups2, Test_NB2_onlynums)
+NB_HappyGroups2
+
+print(NB_HappyGroups_Pred2)
+table(NB_HappyGroups_Pred2,Happiness_NB2_TestLABELS)
+#confusionMatrix(NB2018_results$NB_HappyGroups_Pred2, NB2018_results$HappinessLevel)
+
+barplot(table(NB_HappyGroups_Pred2), main="Naive Bayes Prediction (Validation set)", col=brewer.pal(10,"Set3"),
+    xlab="Prediction", ylab = "Density")
+
+# combine prediction with original DF
+NB_3CAT_results=cbind(Test_Happiness_NB2, NB_HappyGroups_Pred2)
+confusionMatrix(NB_3CAT_results$NB_HappyGroups_Pred2, NB_3CAT_results$HappinessLevel)
+
+##Visualize
+plot(NB_HappyGroups_Pred2, ylab = "Density", main = "Naive Bayes Plot 3 categories")
+
+##NOTE: confusion matrix shows this method is not as accurate as predicting 2 cats only
+
+# predict 2018 happiness levels / 3 categories
+NB_HappyGroups2_Pred2018<-predict(NB_HappyGroups2, Test2018_NB2_onlynums)
+print(NB_HappyGroups2_Pred2018)
+table(NB_HappyGroups2_Pred2018,Happiness_NB2_2018_LABELS)
+##Visualize
+plot(NB_HappyGroups2_Pred2018, ylab = "Density", main = "Naive Bayes 2018 Prediction - 3 categories")
+
+barplot(table(NB_HappyGroups2_Pred2018), main="Naive Bayes 2018 Prediction (3 levels)", col=brewer.pal(10,"Set3"),
+    xlab="Prediction", ylab = "Frequency")
+
+# prediction confusion matrix
+table(NB_HappyGroups2_Pred2018,Happiness_NB2_2018_LABELS)
+
+barplot(table(NB_HappyGroups_Pred2), main="Naive Bayes Prediction (Validation set)", col=brewer.pal(10,"Set3"),
+    xlab="Prediction", ylab = "Frequency")# combine prediction with original DF
+NB_3CAT_2018_results=cbind(Happiness_NB2_2018, NB_HappyGroups2_Pred2018)
+confusionMatrix(NB_3CAT_2018_results$NB_HappyGroups2_Pred2018, NB_3CAT_2018_results$HappinessLevel)
+```
+
+#### Let's plot some results
+
+```{r}
+# Histogram for 2018 Prediction by Region
+theme_set(theme_classic())
+
+nb_hist <- ggplot(NB_3CAT_2018_results, aes(Region))
+nb_hist + geom_bar(aes(fill=NB_HappyGroups2_Pred2018), width = 0.5) + 
+  theme(axis.text.x = element_text(angle=90)) + 
+  labs(title="Histogram for 2018 Prediction", 
+       subtitle="Prediction score across Regions") +
+  labs(fill="Predicted score")
+
+#Groups by Social Support and Region
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Low") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(GDPLog, fill=Region, color=Region)) +
+  geom_density() +
+   labs(title="Least Happy Predicted Regions", 
+       subtitle="& Social Support") +
+          xlab("Social Support") 
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Medium") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(SocialSupport, fill=Region, color=Region)) +
+  geom_density() + 
+   labs(title="Moderately Happy Predicted Regions", 
+       subtitle="& Social Support") +
+          xlab("Social Support") 
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "High") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(SocialSupport, fill=Region, color=Region)) +
+  geom_density() + 
+  labs(title="Happiest Predicted Regions", 
+       subtitle="& Social Support") +
+          xlab("Social Support")  
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Low") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(HealthyLifeExpectancy, fill=Region, color=Region)) +
+  geom_density() + 
+  labs(title="Least Happy Predicted Regions", 
+       subtitle="& Healthy Life Expectancy") +
+          xlab("Healthy Life Expectancy")  
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Medium") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(HealthyLifeExpectancy, fill=Region, color=Region)) +
+  geom_density() + 
+  labs(title="Moderately Happy Predicted Regions", 
+       subtitle="& Healthy Life Expectancy") +
+          xlab("Healthy Life Expectancy")  
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "High") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(HealthyLifeExpectancy, fill=Region, color=Region)) +
+  geom_density() + 
+  labs(title="Happiest Predicted Regions", 
+       subtitle="& Healthy Life Expectancy") +
+          xlab("Healthy Life Expectancy")  
+
+# Take a look at the top 10 in each group
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "High") %>% 
+  arrange(desc(HappinessScore)) 
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Medium") %>% 
+  arrange(desc(HappinessScore)) 
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Low") %>% 
+  arrange(desc(HappinessScore))  
+
+
+```
+
+#### Naive Bayes results: Predictions by Healthy Life Expectancy
+
+```{r}
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Low") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(Country, HealthyLifeExpectancy, colour=Region)) +
+  geom_point(size=3) + 
+  geom_segment(aes(x=Country,
+                   xend=Country,
+                   y=0,
+                   yend=HealthyLifeExpectancy)) +
+  labs(title="Least Happy Predicted Regions", 
+       subtitle="& Life Expectancy") +
+          xlab("Country") +
+          ylab("Healthy Life Expectancy") +
+  theme(axis.text.x = element_text(angle=85, vjust = 0.5))
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Medium") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(Country, HealthyLifeExpectancy, colour=Region)) +
+  geom_point(size=3) + 
+  geom_segment(aes(x=Country,
+                   xend=Country,
+                   y=0,
+                   yend=HealthyLifeExpectancy)) +
+  labs(title="Moderately Happy Predicted Regions", 
+       subtitle="& Life Expectancy") +
+          xlab("Country") +
+          ylab("Healthy Life Expectancy") +
+  theme(axis.text.x = element_text(angle=85, vjust = 0.5)) +
+  theme(legend.position = "none")
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "High") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(Country, HealthyLifeExpectancy, colour=Region)) +
+  geom_point(size=3) + 
+  geom_segment(aes(x=Country,
+                   xend=Country,
+                   y=0,
+                   yend=HealthyLifeExpectancy)) +
+  labs(title="Happiest Predicted Regions", 
+       subtitle="& Life Expectancy") +
+          xlab("Country") +
+          ylab("Healthy Life Expectancy") +
+  theme(axis.text.x = element_text(angle=85, vjust = 0.5)) 
+
+```
+
+#### Naive Bayes results: Predictions by Social Support
+
+```{r}
+library(ggplot2)
+#Groups by Social Support and Region
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Low") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(GDPLog, fill=Region, color=Region)) +
+  geom_density() +
+   labs(title="Least Happy Predicted Regions", 
+       subtitle="& GDP") +
+          xlab("GDP") 
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Low") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(SocialSupport, fill=Region, color=Region)) +
+  geom_density() +
+   labs(title="Least Happy Predicted Regions", 
+       subtitle="& Social Support") +
+          xlab("Social Support") 
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Medium") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(GDPLog, fill=Region, color=Region)) +
+  geom_density() +
+   labs(title="Moderately Happy Predicted Regions", 
+       subtitle="& GDP") +
+          xlab("GDP")
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Medium") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(SocialSupport, fill=Region, color=Region)) +
+  geom_density() + 
+   labs(title="Moderately Happy Predicted Regions", 
+       subtitle="& Social Support") +
+          xlab("Social Support") 
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "High") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(GDPLog, fill=Region, color=Region)) +
+  geom_density() +
+   labs(title="Happiest Predicted Regions", 
+       subtitle="& GDP") +
+          xlab("GDP")
+
+NB_3CAT_2018_results %>% 
+  filter(NB_HappyGroups2_Pred2018 == "High") %>% 
+  arrange(desc(Region)) %>% 
+  ggplot(aes(SocialSupport, fill=Region, color=Region)) +
+  geom_density() + 
+  labs(title="Happiest Predicted Regions", 
+       subtitle="& Social Support") +
+          xlab("Social Support") 
+
+```
+
+#### Summary Statistics and Analysis for Naive Bayes Predicted Groups
+
+```{r}
+# Summarize groups
+# Healthy Life Expectancy
+NB_3CAT_2018_results %>% 
+group_by(NB_HappyGroups2_Pred2018) %>%  
+  summarise(avg = mean(HealthyLifeExpectancy)) %>%
+  arrange(avg)
+
+# Social Support
+NB_3CAT_2018_results %>% 
+group_by(NB_HappyGroups2_Pred2018) %>%  
+  summarise(avg = mean(SocialSupport)) %>%
+  arrange(avg)
+
+# Freedom of Choice
+NB_3CAT_2018_results %>% 
+group_by(NB_HappyGroups2_Pred2018) %>%  
+  summarise(avg = mean(FreedomOfChoice)) %>%
+  arrange(avg)
+
+# Corruption
+NB_3CAT_2018_results %>% 
+group_by(NB_HappyGroups2_Pred2018) %>%  
+  summarise(avg = mean(Corruption)) %>%
+  arrange(avg)
+
+# GDP Log
+NB_3CAT_2018_results %>% 
+group_by(NB_HappyGroups2_Pred2018) %>%  
+  summarise(avg = mean(GDPLog)) %>%
+  arrange(avg)
+
+# Look to see which countries scored differently via prediction
+diff_scores <- NB_3CAT_2018_results %>%
+  group_by(NB_HappyGroups2_Pred2018) %>% 
+  filter(HappinessLevel != NB_HappyGroups2_Pred2018) %>% 
+  arrange(desc(NB_HappyGroups2_Pred2018))
+
+# Save to a file
+write.csv(diff_scores, file="DiffvsActual2018.csv", row.names=FALSE)
+  
+# find variance between categories to see where the prediction 'failed'
+# countries predicted by NB as Happiest
+diff_scores_HIGH <- diff_scores %>% 
+  filter(NB_HappyGroups2_Pred2018 == "High") 
+
+diff_scores_HIGH <- subset(diff_scores_HIGH, select = -c(Year, HappinessScore, SDHLE))
+variance_HIGH <- apply(diff_scores_HIGH, MARGIN=2, var)
+View(variance_HIGH)
+
+# countries predicted by NB as Moderately Happy
+diff_scores_HIGH <- diff_scores %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Medium") 
+
+diff_scores_MEDIUM <- subset(diff_scores_HIGH, select = -c(Year, HappinessScore, SDHLE))
+variance_MEDIUM <- apply(diff_scores_MEDIUM, MARGIN=2, var)
+
+# countries predicted by NB as Least Happy
+diff_scores_LOW <- diff_scores %>% 
+  filter(NB_HappyGroups2_Pred2018 == "Low") 
+
+diff_scores_LOW <- subset(diff_scores_HIGH, select = -c(Year, HappinessScore, SDHLE))
+variance_LOW <- apply(diff_scores_LOW, MARGIN=2, var)
+
+variance_TOTAL <- cbind(variance_HIGH, variance_MEDIUM, variance_LOW)
+variance_TOTAL <- na.omit(variance_TOTAL)
+variance_TOTAL <- t(variance_TOTAL)
+View(variance_TOTAL)
+
+
+```
+
+### Association Rules Mining
+
+```{r}
+#library(arules)
+#library(arulesViz)
+#library(ggplot2)
+#library(readxl)
+
+WorldHappinessData <- read_excel("WorldHappinessData_AWS.xls")
+
+# read in the data
+#worldhappinessdata <- read_excel("worldhappinessdata.xls")
+#whd <- as.data.frame(worldhappinessdata)
+whd <- as.data.frame(WorldHappinessData)
+
+# clean up data
+# remove years before 2015
+whd <- whd[whd$Year>=2015,]
+# set row names
+whd$row <- paste(whd$`Country name`,whd$Year)
+row.names(whd) <- whd$row
+# remove unnecssary columns
+whd <- whd[,c(3:12)]
+# rename columns
+colnames(whd) <- c("LifeLadder","LogGDP","SocialSupport","HLifeExpectancy","FreedomOfChoice","Generosity","Corruption","PositiveAffect","NegativeAffect","ConfidenceInGovt")
+# find null values
+indx <- apply(whd, 2, function(x) any(is.na(x) | is.infinite(x)))
+indx # LogGDP, Social Support, HLifeExpectancy, FreedomOfChoice,Generosity,Corruption,PositiveAffect, NegativeAffect, ConfidenceinGovt
+# fill in null values with the column's average
+for(col in 1:ncol(whd)){whd[is.na(whd[,col]), col] <- mean(whd[,col], na.rm = TRUE)}
+
+
+# prep for Association Rule Mining
+# change numerical data into nominal
+summary(whd)
+whdx <- whd # creating a backup in case discretization fails
+boxplot(whd[,c(1,2)],use.cols=TRUE)
+boxplot(whd[,c(3,5,7:10)],use.cols=TRUE)
+boxplot(whd[,4],use.cols=TRUE,xlab="Healthy Life Expectancy")
+boxplot(whd[,6],use.cols=TRUE,xlab="Generosity")
+# discretizing Life Ladder
+whd$LifeLadder[whd$LifeLadder<=4] <- "LowLL" # first quartile
+whd$LifeLadder[whd$LifeLadder<=6.5] <- "MedLL" # third quartile
+whd$LifeLadder[whd$LifeLadder<=7.8] <- "HighLL" # max
+# discretizing LogGDP
+whd$LogGDP[whd$LogGDP<=8.5] <- "LowLGDP" # first quartile
+whd$LogGDP[whd$LogGDP<=9.5] <- "MedLGDP" # median
+whd$LogGDP[whd$LogGDP<=12] <- "HighLGDP" # max
+# discretizing social support
+whd$SocialSupport[whd$SocialSupport<=0.75] <- "LowSS" # first quartile
+whd$SocialSupport[whd$SocialSupport<=0.81] <- "MedSS" # mean
+whd$SocialSupport[whd$SocialSupport<=1] <- "HighSS" # max
+# discretizing healthy life expectancy
+whd$HLifeExpectancy[whd$HLifeExpectancy<=60] <- "EarlyLE" # first quartile
+whd$HLifeExpectancy[whd$HLifeExpectancy<=65] <- "MedLE" # mean
+whd$HLifeExpectancy[whd$HLifeExpectancy<=80] <- "LongLE" # max
+# discretizing healthy life expectancy
+whd$FreedomOfChoice[whd$FreedomOfChoice<=0.7] <- "LimFC" # first quartile
+whd$FreedomOfChoice[whd$FreedomOfChoice<=0.8] <- "ModFC" # median
+whd$FreedomOfChoice[whd$FreedomOfChoice<=1] <- "HighFC" # max
+# discretizing generosity (avg of 2 binary questions)
+whd$Generosity[whd$Generosity<=-0.12] <- "LimGen" # first quartile
+whd$Generosity[whd$Generosity<=0] <- "ModGen" # mean
+whd$Generosity[whd$Generosity<=0.7] <- "HighGen" # max
+# discretizing corruption (1 binary)
+whd$Corruption[whd$Corruption<=0.7] <- "HighCorrup" # first quartile
+whd$Corruption[whd$Corruption<=0.8] <- "ModCorrup" # median
+whd$Corruption[whd$Corruption<=1] <- "NotCorrup" # max
+# discretizing positive affect
+whd$PositiveAffect[whd$PositiveAffect<=0.65] <- "LowPA" # first quartile
+whd$PositiveAffect[whd$PositiveAffect<=0.75] <- "MedPA" # mean
+whd$PositiveAffect[whd$PositiveAffect<=1] <- "HighPA" # max
+# discretizing negative affect
+whd$NegativeAffect[whd$NegativeAffect<=0.22] <- "LowNA" # first quartile
+whd$NegativeAffect[whd$NegativeAffect<=0.35] <- "MedNA" # median/mean
+whd$NegativeAffect[whd$NegativeAffect<=0.7] <- "HighNA" # max
+# discretizing confidence in govt
+whd$ConfidenceInGovt[whd$ConfidenceInGovt<=0.35] <- "LowCiG" # first quartile
+whd$ConfidenceInGovt[whd$ConfidenceInGovt<=0.60] <- "ModCiG" # third quartile
+whd$ConfidenceInGovt[whd$ConfidenceInGovt<=1] <- "HighCiG" # max
+
+# factorize everything
+whd$LifeLadder <- as.factor(whd$LifeLadder)
+whd$LogGDP <- as.factor(whd$LogGDP)
+whd$SocialSupport <- as.factor(whd$SocialSupport)
+whd$HLifeExpectancy <- as.factor(whd$HLifeExpectancy)
+whd$FreedomOfChoice <- as.factor(whd$FreedomOfChoice)
+whd$Generosity <- as.factor(whd$Generosity)
+whd$Corruption <- as.factor(whd$Corruption)
+whd$PositiveAffect <- as.factor(whd$PositiveAffect)
+whd$NegativeAffect <- as.factor(whd$NegativeAffect)
+whd$ConfidenceInGovt <- as.factor(whd$ConfidenceInGovt)
+
+str(whd)
+
+# convert the cleaned up whd into transactions
+whdt <- as(whd, "transactions")
+summary(whdt)
+
+# explore data
+itemFrequencyPlot(whdt,topN=20,type="absolute")
+
+#### association rule mining ####
+# create rules with pep=YES on the RHS
+rules <- apriori(whdt, parameter=list(supp=0.01, conf=0.5)) # 74,852 rules -- too many!
+
+# sort by confidence, then sort top 20 by support
+rulesc <- sort(rules, decreasing=TRUE, by="confidence")
+rulesc <- rulesc[1:25000]
+inspect(rulesc[1:20])
+plot(rules,method="graph",interactive=TRUE,shading=NA) # interactive plot! but very dense
+
+subrules <- head(sort(rulesc[1:20000], by="support"), 20)
+inspect(subrules)
+summary(subrules)
+plot(subrules,method="graph",interactive=TRUE,shading=NA)
+plot(subrules,method="graph",main="Association Rules for World Happiness")
+
+# create rules with LogGDP=HighLGDP on the RHS
+rules2 <- apriori(whdt, parameter=list(supp=0.01, conf=0.5), 
+                 appearance = list(default="lhs", rhs="LogGDP=HighLGDP"),control = list(verbose=F))
+# sort by confidence, then sort top 20 by support
+rulesc2 <- sort(rules2, decreasing=TRUE, by="confidence")
+rulesc2 <- rulesc2[1:25000]
+inspect(rulesc2[1:20])
+plot(rules2,method="graph",interactive=TRUE,shading=NA) # interactive plot! but very dense
+
+subrules2 <- head(sort(rulesc2, by="support"), 20)
+inspect(subrules2)
+summary(subrules2)
+plot(subrules2,method="graph",interactive=TRUE,shading=NA)
+plot(subrules2,method="graph",main="Association Rules for World Happiness, LogGDP")
+
+
+# create rules with LifeLadder on the RHS
+rules3 <- apriori(whdt, parameter=list(supp=0.01, conf=0.5), 
+                  appearance = list(default="lhs", rhs="LifeLadder=HighLL"),control = list(verbose=F))
+# sort by confidence, then sort top 20 by support
+rulesc3 <- sort(rules3, decreasing=TRUE, by="confidence")
+rulesc3 <- rulesc3[1:25000]
+inspect(rulesc3[1:20])
+plot(rules3,method="graph",interactive=TRUE,shading=NA) # interactive plot! but very dense
+
+subrules3 <- head(sort(rulesc3, by="support"), 20)
+inspect(subrules3)
+summary(subrules3)
+plot(subrules3,method="graph",interactive=TRUE,shading=NA)
+plot(subrules3,method="graph",main="Association Rules for World Happiness, LifeLadder")
+
+
+```
+
+### Text Mining World Headlines
+
+```{r}
+# load libraries
+#library(plyr)
+#library(dplyr)
+#library(tidyverse)
+#library(tidyr)
+#library(tidytext)
+#library(readr)
+#library(textclean)
+#library(tm)
+#library(reshape2)
+#library(wordcloud)
+#library(RColorBrewer)
+#library(qdap)
+#library(ggplot2)
+#library(syuzhet)
+#library(textdata)
+#library(ggraph)
+
+```
+
+
+
+```{r}
+###Importing the dataset (and correcting the data types at the same time)
+globalnews <- read_csv("world_news_dataset.csv", 
+              col_types = cols(Date = col_date(format = "%m/%d/%Y")))
+head(globalnews)
+str(globalnews)
+dim(globalnews)
+
+#####################################################
+####The columns' data types are the correct type & the column names are OK.
+#####################################################
+
+```
+
+
+```{r}
+#####################################################
+###After checking out the data, first, let's tokenize the headlines for text analysis
+#####################################################
+
+gn_words <- globalnews %>% unnest_tokens(word,text)
+
+str(gn_words)
+dim(gn_words)
+head(gn_words)
+
+```
+
+
+```{r}
+####################################################
+###We have successfully removed China and Russia -- this is not ideal, 
+###but, given the lack of any way to translate the langauges without
+###translators, vital sentiment and context would be lost (even if we
+###translated the values using Google translate or similar). Better to
+###remove and analyze at a future date than completely corrupt the results.
+#####################################################
+
+#####################################################
+###Counting how many words per country in dataset - before removing stop words
+#####################################################
+
+gn_countrycount <- gn_words %>% group_by(name) %>% count(name)
+head(gn_countrycount)
+str(gn_countrycount)
+
+#####################################################
+###checking out the most commonly used headline words
+#####################################################
+
+gn_frequency <- gn_words %>%
+  anti_join(stop_words, by="word")
+
+gn_frequency
+
+gn_frequency %>% count(word, sort = TRUE) %>% top_n(50) 
+
+###Counting countries' words before stop words removed
+
+gn_countrycount2 <- gn_frequency %>% group_by(name) %>% count(name)
+head(gn_countrycount2)
+
+###Removing Russia and China again --
+gn_frequency <- gn_frequency %>% filter(name != "China")
+gn_frequency <- gn_frequency %>% filter(name !="Russia")
+
+###Counting countries' words after stop words removed
+gn_countrycount2 <- gn_frequency %>% group_by(name) %>% count(name)
+head(gn_countrycount2)
+
+####################################################
+###Looks like France, Italy, and Argentina are the top 3 by word count.
+#####################################################
+###Visualizing the most commonly used words
+#####################################################
+
+ggplot(gn_frequency %>% count(word, sort = TRUE) %>% 
+  top_n(50),
+  aes(reorder(word,n),n)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = n),color="#0f190f", hjust = -0.05, size = 2) +
+  theme_bw() +
+  coord_flip() +
+  xlab("Number of Occurences") +
+  ylab("Words used") +
+  ggtitle("Top 50 Most Commonly Used Words - World News Dataset") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+####################################################
+###These results reveal that across all the languages, common stop words 
+###like "de" and "la" are the most frequent words used -- not surprising! 
+###Let's remove them to get a better idea of what words are actually meaningful.
+#####################################################
+
+stopwords <- data.frame(word = c(stop_words$word,"wednesday", "de", "la", "en", 
+                               "el", "le", "del", "il", "des", "der", "die",
+                               "di", "les", "se", "una", "con", "und", "por",
+                               "dans", "das", "se", "den", "sur", "es", "ist", 
+                               "al", "du", "for", "a", "the", "and", "but",
+                               "une", "au", "aux", "?", "von", "los", "las", "avec",
+                               "par", "ce", "qui", "est", "su", "og", "er", "til", 
+                               "av", "er", "che", "si", "da", "ha", "dei", "della"))
+str(stopwords)
+stopwords$word <- as.character(stopwords$word)
+
+gn_frequency <- gn_words %>%
+  anti_join(stopwords, by="word")
+
+str(gn_frequency)
+
+#####################################################
+###Now that stopwords across languages are removed:
+###How often are the top 5 most frequently used words used by country?
+#####################################################
+
+ggplot(gn_frequency %>% group_by(name, word) %>% 
+  summarize(num = n()) %>% 
+  top_n(10, num) %>% 
+  ungroup(),
+  aes(x=reorder(word, num),y = num)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  coord_flip() +
+  xlab("Number of Occurences") +
+  ylab("Words Used")+
+  ggtitle("Number of Occurences - Top 5 Words by Country")+
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_text(angle = 40, hjust = 1))+
+  facet_wrap(~name, scales = "free")
+
+####################################################
+###This gives great results with the stop words now removed across langauges!
+#####################################################
+
+#####################################################
+###More visualizations - the most commonly used words with GGPlot
+#####################################################
+
+ggplot(gn_frequency %>% count(word, sort = TRUE) %>% 
+  top_n(50),
+  aes(reorder(word,n),n)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = n), color="#0f190f", hjust = -0.05, size = 2) +
+  theme_bw() +
+  coord_flip() +
+  xlab("Number of Occurences") +
+  ylab("Words used") +
+  ggtitle("Top 50 Most Commonly Used Words - World News Dataset")+
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+#####################################################
+###This shows that 2018, surprisingly, is the top word used, followed by "2." 
+###Then "president" is the 3rd most commonly used word. Let's remove the numbers
+###and proceed analyzing.
+#####################################################
+
+stopwords <- data.frame(word = c(stop_words$word,"2018", "2", "wednesday", "de", "la", "en", 
+                                 "el", "le", "del", "il", "des", "der", "die",
+                                 "di", "les", "se", "una", "con", "und", "por",
+                                 "dans", "das", "se", "den", "sur", "es", "ist", 
+                                 "al", "du", "for", "a", "the", "and", "but",
+                                 "une", "au", "aux", "?", "von", "los", "las", "avec",
+                                 "par", "ce", "qui", "est", "su", "og", "er", "til", 
+                                 "av", "er", "che", "si", "da", "ha", "dei", "della", "pour",
+                                 "apr?s", "p?", "som", "det", "?", "para", "auf", "f?r", "im", "ein", "mit", "?", "?"))
+str(stopwords)
+stopwords$word <- as.character(stopwords$word)
+
+gn_words <- gn_frequency %>%
+  anti_join(stopwords, by="word")
+
+str(gn_words)
+
+#####################################################
+###Re-analyzing most frequently used non-meaningful/stop words removed
+#####################################################
+
+ggplot(gn_words %>% group_by(name,word) %>% 
+  summarize(num = n()) %>% 
+  top_n(10, num) %>% 
+  ungroup(),
+  aes(x=reorder(word,num),y=num))+
+  geom_bar(stat = "identity")+
+  theme_bw()+
+  coord_flip()+
+  xlab("Number of Occurences")+
+  ylab("Words Used")+
+  ggtitle("Number of Occurences - Top 5 Words by Country (and Africa)")+
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_text(angle = 40, hjust = 1))+
+  facet_wrap(~name,scales = "free")
+
+ggplot(gn_words %>% count(word, sort = TRUE) %>% 
+  top_n(50),
+  aes(reorder(word,n),n)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = n), color="#0f190f", hjust = -0.05, size = 2) +
+  theme_bw() +
+  coord_flip() +
+  xlab("Number of Occurences") +
+  ylab("Words used") +
+  ggtitle("Top 50 Most Commonly Used Words - World News Dataset")+
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+#####################################################
+###Not Surprisingly perhaps - "president" and "trump" are extxremely high!
+#####################################################
+
+#####################################################
+###Sentiment analysis - using the Bing lexicon first
+#####################################################
+
+gn_bing <- gn_words %>%
+  inner_join(get_sentiments("bing"), by = "word") %>%
+  ungroup()
+
+head(gn_bing)
+
+#####################################################
+###What are the top 10 positive and negative words across headlines? Bing lexicon
+#####################################################
+
+gn_bing %>%
+  count(word,sentiment) %>%
+  group_by(sentiment) %>%
+  top_n(10, n) %>%
+  ungroup() %>%
+  ggplot(aes(x=reorder(word,n), y = n, fill = sentiment)) +
+  geom_col(show.legend = FALSE)+
+  coord_flip()+
+  facet_wrap(~sentiment, scales="free")+
+  labs(x="Number of Occurences",y="Words", title="Top 10 Positive & Negative Words among All Headlines (Using Bing Lexicon)")+
+  theme(plot.title = element_text(size = 8, face = "bold"))
+
+#####################################################
+###interestingly - the Bing lexicon thinks "Trump" is a positive word...
+#####################################################
+
+#####################################################
+###Further sentiment analysis -- NRC lexicon
+#####################################################
+
+gn_nrc <- gn_words %>%
+  inner_join(get_sentiments("nrc"), by="word") %>%
+  ungroup()
+
+NRC_Results <- table(gn_nrc$sentiment)
+NRC_Results <- as.data.frame(NRC_Results)
+plot(NRC_Results)
+
+###Visualizing the NRC results
+
+ggplot(data = NRC_Results, aes(x=Var1,y = Freq))+
+   geom_col(show.legend = FALSE) +
+   coord_flip() +
+   labs(x = "Number of Occurences",y = "Word Frequency Count",
+        title="Sentiment Category Results by Frequency (All Headlines)") +
+   theme(plot.title = element_text(size = 8, face = "bold"))
+
+#####################################################
+###NRC analysis shows we see that there are more negative words 
+###overall than positive in these headlines - not uncommon for news unfortunately.
+#####################################################
+#####################################################
+####Visualizing top NRC word results - all headlines/countries, broken down by sentiment this time
+#####################################################
+
+gn_nrc %>%
+  filter(sentiment %in% c("joy", "anger", "positive", "negative", "sadness")) %>%
+  group_by(sentiment) %>%
+  count(word,sentiment) %>%
+  top_n(10,n) %>%
+  ungroup() %>%
+  ggplot(aes(x = reorder(word, n),y = n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~sentiment, scales="free") +
+  labs(x="Words",y ="Number of Occurences", title = "Top 10 Words for Each Emotion across All Headlines (NRC Lexicon)")+
+  theme(plot.title = element_text(size = 8, face = "bold"))
+
+#################################################
+###NRC considers "government" a negative word, and "court" an angry one.
+###Interestingly - NRC has "trump" as "surprise" sentiment. That seems
+###to indicate perhaps it is using "trump" closer to its dictionary definition
+###versus a proper noun name.
+###It also has "president" under both "positive" and "trust" sentiments respectively.
+###This shows that context in text mining is important - works like "black" and "court"
+###are used in nuanced ways that this analysis may not capture.
+#################################################
+
+##############################################################################
+##############################################################################
+###Text Mining the dataset
+##############################################################################
+##############################################################################
+
+##############Practicing with TidyR and NRC lexicon - a slightly different coding [will likely remove later]
+
+tidy_gn <- globalnews %>% 
+  group_by(text) %>% 
+  mutate(linenumber = row_number()) %>% 
+  ungroup() %>% 
+  unnest_tokens(word, text)
+
+nrc_gnJoy <- get_sentiments("nrc") %>% 
+  filter(sentiment == "joy")
+
+tidy_gn %>% 
+  inner_join(nrc_gnJoy) %>% 
+  count(word, sort = TRUE)
+
+###These results match our "joy" results from NRC above. Good way to check the work.
+
+###########################################################
+###Exploring the headlines by country -- Looking at USA only sentiment to start.
+###########################################################
+
+gn_usa <- gn_nrc %>% filter(name == "US")
+
+gn_usa %>%
+  filter(sentiment %in% c("joy","anger","positive","negative","sadness")) %>%
+  group_by(sentiment) %>%
+  count(word, sentiment) %>%
+  top_n(10, n) %>%
+  ungroup() %>%
+  
+ggplot(aes(x = reorder(word, n), y = n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~sentiment, scales = "free") +
+  labs(x = "Number of Occurences", y = "Word Sentiment Frequency", title ="Top 10 Words for Each NRC Emotion, USA-Only Headlines")+
+  theme(plot.title = element_text(size = 8, face = "bold"))
+
+###################################################
+###Saddeningly "death" and "shooting" are among the most common sad, negative, and angry words.
+###################################################
+
+###################################################
+####visualizing only New Zealand=-only headline sentiment (NRC)
+
+unique(gn_nrc$name)
+
+gn_nz <- gn_nrc %>%  filter(name == "New Zealand")
+
+gn_nz %>%
+  filter(sentiment %in% c("joy","anger","positive","negative","sadness")) %>%
+  group_by(sentiment) %>%
+  count(word,sentiment) %>%
+  top_n(10,n) %>%
+  ungroup() %>% 
+  ggplot(aes(x = reorder(word,n), y = n,fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~sentiment,scales="free") +
+  labs(x="number of occurences",y="Sentiment Totals by Word Count",title ="Top 10 words for Each NRC emotions, NZ-Only Headlines")+
+  theme(plot.title = element_text(size = 8, face = "bold"))
+
+###################################################
+###visualizing Africa (unfortunately, Africa is listed as a country instead of a continent
+###in this dataset). Future analysis should collect data *per country* for Africa for meaningful
+###comparison to the World Happiness Report dataset.
+###However, the sentiment for Africa vs other regions should be much less 
+###positive if it correlates with the World Happiness Report results
+###################################################
+
+gn_africa <- gn_nrc %>% filter(name == "Africa")
+
+gn_africa %>%
+  filter(sentiment %in% c("joy","anger","positive","negative","sadness")) %>%
+  group_by(sentiment) %>%
+  count(word,sentiment) %>%
+  top_n(10,n) %>%
+  ungroup() %>%
+  ggplot(aes(x = reorder(word,n), y = n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~sentiment,scales="free") +
+  labs(x="number of occurences",y="Words",title = "Top 10 Words for Each NRC Emotion, Africa-Only Headlines")+
+  theme(plot.title = element_text(size = 8, face = "bold"))
+
+###################################################
+###"Murder" is the top negative, sadness, and anger result word -- 
+###this correlates with African countries' experiencing
+###political turmoil, natural disasters, and epidemics many African countries face.
+###################################################
+
+###################################################
+###Using Bing lexicon - exploration of which words contribute most to each sentiment
+###################################################
+
+bing_word_counts <- tidy_gn %>% 
+  inner_join(get_sentiments("bing")) %>% 
+  count(word, sentiment, sort = TRUE) %>% 
+  ungroup() %>% 
+  anti_join(stopwords, by ="word")
+
+bing_word_counts %>% 
+  group_by(sentiment) %>% 
+  top_n(10) %>% 
+  ungroup() %>% 
+  mutate(word = reorder(word, n)) %>% 
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to Sentiment - Bing Lexicon", x = NULL) +
+  coord_flip()
+
+###################################################
+####As before the only anomaly seems to be "trump" as a positive word. 
+###"Died", "death," and "dead" are the top negative words,
+###"Dead" is the most contributing.
+###################################################
+
+###################################################
+####Making a word cloud of news headlines
+
+###All headlines: 
+gn_frequency %>% 
+  anti_join(stop_words) %>% 
+  count(word) %>% 
+  with(wordcloud(word, n, max.words = 100))
+
+###Africa only:
+gn_africa %>% 
+  anti_join(stop_words) %>% 
+  count(word) %>% 
+  with(wordcloud(word, n, max.words = 100))
+
+###USA only:
+gn_usa %>% 
+  anti_join(stop_words) %>% 
+  count(word) %>% 
+  with(wordcloud(word, n, max.words = 100))
+
+###NZ only:
+gn_nz %>% 
+  anti_join(stop_words) %>% 
+  count(word) %>% 
+  with(wordcloud(word, n, max.words = 100))
+
+#############################################
+####Word cloud - displaying the most positive and negative words
+#############################################
+
+gn_words %>% 
+  inner_join(get_sentiments("nrc")) %>% 
+  count(word, sentiment, sort = TRUE) %>% 
+  acast(word ~ sentiment, value.vgrayar = "n", fill = 0) %>% 
+  comparison.cloud(colors = c("grey80", "grey20"),
+                   max.words = 100)
+
+#################################################################
+################################################################
+###TF-IDF of the all countries' headlines
+################################################################
+################################################################
+###Most common words used -- a, the, of, to, from, etc.
+
+#total_words <- globalnews %>% 
+#  unnest_tokens(word, text) %>% 
+#  count(word, sort = TRUE) %>% 
+#  ungroup()
+
+#tfidf_words <- total_words %>% 
+#  group_by(word) %>% 
+#  summarize(total = sum(n))
+
+#str(total_words)
+#dim(total_words)
+
+####The first 6822 rows are numbers and/or typos with no text.
+###Removing those to clean results.
+
+#tfidf_words <- total_words[6823:122451,]
+
+#tfidf_words <- left_join(tfidf_words, total_words)
+
+#tfidf_words
+
+###Distribution of n/total for words in headlines
+
+##ggplot(tfidf_words, aes(x = n/122451), fill = n) +
+#         geom_histogram(show.legend = FALSE) +
+#         xlim(NA, 0.00009) +
+#         facet_wrap(~n, ncol = 2, scales = "free_y")
+
+#tfidf_words <- total_words %>% 
+#  bind_tf_idf(word, n/122451, n)
+
+#total_words
+
+###High TF-IDF value words
+
+#total_words %>% 
+#  select(-total) %>% 
+#  arrange(desc(tf_idf))
+
+#total_words
+
+###[check TF-IDF is done right?]
+
+#total_words %>% 
+#  arrange(desc(tf_idf)) %>% 
+#  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+#  group_by(total) %>% 
+#  top_n(10) %>% 
+#  ungroup() %>% 
+#  ggplot(aes(word, tf_idf, fill = word)) +
+#  geom_col(show.legend = FALSE) +
+#  labs(x = NULL, y = "TF-IDF") +
+#  facet_wrap(~word, ncol = 2, scales = "free") +
+  
+  
+################
+###Exploring bigrams in the headlines
+##############
+
+gn_bigrams <- globalnews %>% 
+  unnest_tokens(bigram, text, token = "ngrams", n = 2) 
+
+gn_bigrams<- gn_bigrams %>% filter(name !="Russia")
+gn_bigrams<- gn_bigrams %>% filter(name !="China")
+gn_bigrams %>% count(bigram, sort = TRUE)
+
+gn_bigrams_sep <- gn_bigrams %>% 
+  separate(bigram, c("word1", "word2", sep = " "))
+
+str(gn_bigrams_sep)
+
+bigrams_filtered <- gn_bigrams_sep %>% 
+  filter(!word1 %in% stop_words$word) %>% 
+  filter(!word2 %in% stop_words$word) 
+
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, SORT = TRUE)
+
+###The first 18K rows are some sort of random numbers - removing these
+bigram_counts <- bigram_counts[18692:485945,]
+
+str(bigram_counts)
+
+bigrams_united <- bigram_counts %>% 
+  unite(bigram, word1, word2, sep = " ")
+
+str(bigrams_united)
+
+bigrams_united <- bigrams_united %>% 
+  count(bigram, n)
+
+max(bigrams_united$n)
+min(bigrams_united$n)
+
+bigram_graph <- bigram_counts %>% 
+  filter(n > 100)
+
+#need to remove stop words from bigrams?
+#bigram_graph <- bigram_graph %>% anti_join(stopwords, by="bigram")
+
+#bigram_graph
+
+#works but must remove stopwords in other languages
+#ggraph(bigram_graph, layout = "fr") +
+#  geom_edge_link() +
+#  geom_node_point() +
+#  geom_node_text(aes(label = name), vjust = 10, hjust = 10) +
+#  ggtitle("Most Common Bigrams - Headline Dataset")
+
+
+#############################
+#Citation: Rohit Kulkarni (2017), A Million News Headlines [CSV Data file], doi:10.7910/DVN/SYBGZL, 
+#Retrieved from: [https://www.kaggle.com/vsridhar7/sentiment-analysis-using-tidytext]
+#"Text Mining with R: A Tidy Approach." Silge, Julia; Robinson, David. 2017. O'Reilly books.
+
+
+```
+
+### SVM - Analysis
+
+``` {r}
+# SVM Pre-fit Analysis
+ggplot(Happiness_complete[, !names(Happiness_complete) %in% c("Country", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore")], aes(x=HealthyLifeExpectancy, y=GDPLog)) + geom_point(aes( color=HappinessLevel)) + 
+  ggtitle("All Report Happiness Level") + theme(legend.title = element_text(size = 10), legend.text = element_text(size = 10)) + 
+  guides(shape = guide_legend(override.aes = list(size = 5)))
+
+ggplot(Happiness_prior[, !names(Happiness_prior) %in% c("Country",  "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore")], aes(x=HealthyLifeExpectancy, y=GDPLog)) + geom_point(aes( color=HappinessLevel, shape = Year)) + 
+  ggtitle("2013 to 2017 Happiness Level") + theme(legend.title = element_text(size = 10), legend.text = element_text(size = 10)) + 
+  guides(shape = guide_legend(override.aes = list(size = 3)))
+
+ggplot(Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore")], aes(x=HealthyLifeExpectancy, y=GDPLog)) + geom_point(aes( color=HappinessLevel)) + 
+  ggtitle("2018 Happiness Level") + theme(legend.title = element_text(size = 10), legend.text = element_text(size = 10)) + 
+  guides(shape = guide_legend(override.aes = list(size = 3)))
+
+```
+
+### SVM #1
+
+``` {r}
+library(e1071)
+library(RColorBrewer)
+
+# SVM #1 - Linear
+tuned_cost_linear <- tune(svm, HappinessLevel~., data=Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "RangedHLE", "HDSLE")],
+                   kernel="linear", scale = TRUE,
+                   ranges=list(cost=c(.01, .1 ,1 ,10 ,100)))
+summary(tuned_cost_linear)  
+plot(tuned_cost_linear)
+tuned_cost_linear$best.parameters
+
+SVM_Happiness <- svm(HappinessLevel~., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "SDHLE", "RangedHLE")], kernel="linear", cost=.01, scale=TRUE, type = 'C')
+print(SVM_Happiness)
+
+SVM_Happiness_pred <- predict(SVM_Happiness, Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "Region", "PositiveAffect", "NegativeAffect", "HappinessScore", "HappinessLevel", "SDHLE", "RangedHLE")], type="class")
+
+SVM_Happiness_results <-  cbind(Happiness_2018, SVM_Happiness_pred)
+confusionMatrix(SVM_Happiness_results$SVM_Happiness_pred, SVM_Happiness_results$HappinessLevel)
+
+plot(SVM_Happiness, data=Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "SDHLE", "RangedHLE")], GDPLog~HealthyLifeExpectancy, slice = list(GDPLog = 10, HealthyLifeExpectancy = 64, SocialSupport = 1, FreedomOfChoice = .75, Generosity = 0, Corruption = .73))
+
+summary(Happiness_prior)
+
+```
+
+### SVM #2
+
+```{r}
+# SVM #2 - Polynomial
+tuned_cost_poly <-  tune(svm, HappinessLevel~., data=Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "RangedHLE", "SDHLE", "Generosity", "FreedomOfChoice", "SocialSupport", "Corruption")], kernel="polynomial", scale=TRUE, 
+  ranges=list(cost=c(.01, .1 ,1 ,10 ,100), gamma = c(.25, .5, 1, 1.5, 2, 2.5, 3)), degree = c(1, 2, 3, 4, 5))
+summary(tuned_cost_poly) 
+plot(tuned_cost_poly)
+tuned_cost_poly$best.parameters
+ 
+SVM_Happiness_poly <- svm(HappinessLevel~., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "RangedHLE", "SDHLE", "Generosity", "FreedomOfChoice", "SocialSupport", "Corruption")], kernel="polynomial", cost =.01, gamma = 1.5, scale=TRUE, type = 'C', degree= 3)
+print(SVM_Happiness_poly)
+
+SVM_Happiness_poly_pred <- predict(SVM_Happiness_poly, Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "HappinessLevel", "RangedHLE", "HDSLE", "Generosity", "FreedomOfChoice", "SocialSupport", "Corruption")], type="class")
+
+SVM_Happiness_poly_results <-  cbind(Happiness_2018, SVM_Happiness_poly_pred)
+print(SVM_Happiness_poly)
+confusionMatrix(SVM_Happiness_poly_results$SVM_Happiness_poly_pred, SVM_Happiness_poly_results$HappinessLevel)
+# SVM_Happiness_results
+
+plot(SVM_Happiness_poly, data=Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "SDHLE", "RangedHLE", "Generosity", "FreedomOfChoice", "SocialSupport", "Corruption")], GDPLog~HealthyLifeExpectancy)
+
+```
+
+### SVM #3
+
+```{r}
+# SVM #3 - Radial Simple
+tuned_cost_simple <-  tune(svm, HappinessLevel~., data=Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "RangedHLE", "SDHLE", "Generosity", "FreedomOfChoice", "SocialSupport", "Corruption")], kernel="radial", scale=TRUE, 
+  ranges=list(cost=c(.01, .1 ,1 ,10 ,100), gamma = c(.25, .5, 1, 2, 3)))
+summary(tuned_cost_simple)  
+plot(tuned_cost_simple)
+tuned_cost_simple$best.parameters
+
+SVM_Happiness_simple <- svm(HappinessLevel~., data = Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "RangedHLE", "SDHLE", "Generosity", "FreedomOfChoice", "SocialSupport", "Corruption")], kernel="radial", cost=100, gamma = 3, scale=TRUE, type = 'C')
+# print(SVM_Happiness)
+
+SVM_Happiness_simple_pred <- predict(SVM_Happiness_simple, Happiness_2018[, !names(Happiness_2018) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "HappinessLevel", "RangedHLE", "HDSLE", "Generosity", "FreedomOfChoice", "SocialSupport", "Corruption")], type="class")
+
+SVM_Happiness_simple_results <-  cbind(Happiness_2018, SVM_Happiness_simple_pred)
+
+print(SVM_Happiness_simple)
+confusionMatrix(SVM_Happiness_simple_results$SVM_Happiness_simple_pred, SVM_Happiness_simple_results$HappinessLevel)
+# SVM_Happiness_results
+
+plot(SVM_Happiness_simple, data=Happiness_prior[, !names(Happiness_prior) %in% c("Country", "Year", "Region", "PositiveAffect",  "NegativeAffect", "HappinessScore", "SDHLE", "RangedHLE", "Generosity", "FreedomOfChoice", "SocialSupport", "Corruption")], GDPLog~HealthyLifeExpectancy)
+
+```
+
+```{r}
+# World Map Happiness Score 2018
+
+worldmap <- map_data("world")
+names(worldmap)[names(worldmap)=="region"] <- "Country"
+worldmap$Country[worldmap$Country == "USA"] <- "United States"
+happy_world <- Happiness_2018 %>%
+  full_join(worldmap, by = "Country")
+
+map_theme <- theme(
+    axis.title.x = element_blank(),
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.y  = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.background = element_rect(fill = "white"))
+
+ggplot(data = happy_world, mapping = aes(x = long, y = lat, group = group)) +
+  geom_polygon(aes(fill = `HappinessScore`))  +
+  scale_fill_continuous(low="thistle2", high="lightcoral", na.value="snow2") +
+  coord_quickmap() +
+  labs(title = "World Happiness - 2018") +
+  map_theme
+
+```

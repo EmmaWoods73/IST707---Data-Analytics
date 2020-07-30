@@ -6,3 +6,5 @@ This project applies a variety of supervised and unsupervised data mining method
 Platforms and software used: RStudio, RMarkdown
 
 Key skills: Data munging, Data transformation, Association Rules Mining, K-Means Clustering, Decision Tree Analysis, Naive Bayes, SVM
+
+HOW TO ACCESS THIS PROJECT: 1) "Emma_Woods_Project_Report" is the final project paper 2)"Emma Woods Final Project.rmd" is the RStudio Markdown file

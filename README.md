@@ -7,4 +7,6 @@ Platforms and software used: RStudio, RMarkdown
 
 Key skills: Data munging, Data transformation, Association Rules Mining, K-Means Clustering, Decision Tree Analysis, Naive Bayes, SVM
 
-HOW TO ACCESS THIS PROJECT: 1) "Emma Woods Project.pdf" is the final project paper 2)"Emma Woods Project.rmd" is the RStudio Markdown file containing the code for the project
+HOW TO ACCESS THIS PROJECT 
+1) "Emma Woods Project.pdf" is the final project paper 
+2) "Emma Woods Project.rmd" is the RStudio Markdown file containing the code for the project
